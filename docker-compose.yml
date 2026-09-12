@@ -1,0 +1,25 @@
+services:
+  reborn-torznab:
+    build: .
+    # or once you've pushed an image somewhere:
+    # image: ghcr.io/<you>/reborn-torznab:latest
+    container_name: reborn-torznab
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "9118:9118"
+    volumes:
+      # Persists list-import caches (tvdb/tmdb lookups) and, if you use
+      # STREMIO_CONFIG_FILE instead of STREMIO_CONFIG, your Stremio config blob.
+      - ./data:/data
+    networks:
+      - default
+      # Join whatever network your stream-fusion-reborn Postgres + StreamFusion
+      # containers are on, so PG_DSN / STREMIO_HOST resolve by container name.
+      - stream-fusion
+
+networks:
+  stream-fusion:
+    external: true
+    name: stream-fusion-reborn_default # adjust to your actual network name
