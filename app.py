@@ -593,6 +593,29 @@ def _list_params(p):
 # --------------------------------------------------------------------------- #
 # search
 # --------------------------------------------------------------------------- #
+def _media_type_from_cat(cat: str) -> Optional[str]:
+    """
+    Best-effort media type from a Torznab cat= list, for t=search (generic)
+    requests where the function name itself carries no type. *arr apps'
+    own indexer-test probe uses exactly this (t=search&cat=<tv-only ids>)
+    and rejects the indexer if items outside the requested categories come
+    back - so an untyped t=search that ignores cat= can return movies to a
+    TV-only probe and get the indexer marked as failing.  Newznab/Torznab
+    category ids: 2xxx = Movies, 5xxx = TV (Prowlarr's own composite ids
+    like 102040/105040 follow the same leading-digit convention).
+    """
+    if not cat:
+        return None
+    ids = [c.strip() for c in cat.split(",") if c.strip().isdigit()]
+    is_movie = any(c.startswith("2") for c in ids)
+    is_tv = any(c.startswith("5") for c in ids)
+    if is_tv and not is_movie:
+        return "series"
+    if is_movie and not is_tv:
+        return "movie"
+    return None
+
+
 async def _search(
     t: str,
     q: str,
@@ -602,11 +625,14 @@ async def _search(
     season: Optional[int],
     ep: Optional[int],
     limit: int,
+    cat: str = "",
 ):
     where = ["ti.info_hash IS NOT NULL", "btrim(ti.info_hash) <> ''"]
     args: list = []
 
     media_type = {"movie": "movie", "movie-search": "movie", "tvsearch": "series", "tv-search": "series"}.get(t)
+    if not media_type:
+        media_type = _media_type_from_cat(cat)
     if media_type:
         args.append(media_type)
         where.append(f"ti.type = ${len(args)}")
@@ -1029,6 +1055,7 @@ async def api(request: Request):
             season=season,
             ep=ep,
             limit=limit,
+            cat=p.get("cat") or "",
         )
 
     return Response(content=_feed_xml(rows), media_type="application/rss+xml")
