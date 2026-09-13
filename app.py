@@ -525,7 +525,7 @@ async def _list_titles(media_type, days, min_seeders, languages, resolutions, li
     where = ["ti.type = $1", "ti.tmdb_id IS NOT NULL"]
     args: list = [media_type]
     if days and days > 0:
-        args.append(int(days) * 86400)
+        args.append(int(days * 86400))
         where.append(f"ti.created_at > extract(epoch from now()) - ${len(args)}::bigint")
     if languages:
         args.append(languages)
@@ -565,12 +565,24 @@ def _list_params(p):
         except ValueError:
             return default
 
+    def _f(name, default):
+        try:
+            return float(p.get(name)) if p.get(name) not in (None, "") else default
+        except ValueError:
+            return default
+
     langs = p.get("languages")
     langs = [x.strip().lower() for x in langs.split(",") if x.strip()] if langs is not None else LIST_LANGUAGES
     res = p.get("resolutions")
     res = [x.strip().lower() for x in res.split(",") if x.strip()] if res is not None else LIST_RESOLUTIONS
+
+    # ?hours= wins over ?days= when both/either are given - lets a caller ask
+    # for a sub-day window (e.g. hours=6) without days= silently truncating it.
+    hours = _f("hours", None)
+    days = (hours / 24.0) if hours is not None else _f("days", float(LIST_DAYS))
+
     return dict(
-        days=_i("days", LIST_DAYS),
+        days=days,
         min_seeders=_i("min_seeders", LIST_MIN_SEEDERS),
         languages=langs,
         resolutions=res,
@@ -745,6 +757,51 @@ def _caps_xml() -> str:
 </caps>"""
 
 
+_FULL_SERIES_MARK_RE = re.compile(r"\bINT[EÉ]GRALE\b|\bCOMPLETE\b|\bCOMPLETO\b", re.I)
+_HAS_SEASON_TOKEN_RE = re.compile(r"\bS\d{1,3}\b|\bSaison\s*\d+\b", re.I)
+_YEAR_TOKEN_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+
+
+def _rewrite_title_for_full_series(raw_title: str, row) -> str:
+    """
+    Sonarr's own release-title parser has no notion of a French "INTEGRALE"
+    (full-series) pack. With no season marker to latch onto, it falls back to
+    misreading a stray 4-digit run (the release's year, e.g. "2016") as a
+    concatenated SxxExx - which both assigns the wrong season/episode AND,
+    since that phantom season/episode is used during series title-matching,
+    can resolve to the wrong show entirely (observed: "MacGyver.2016..."
+    matched the 1985 original instead of the 2016 reboot). Sonarr DOES
+    recognize an explicit season-range token (S01-S99) as a whole-series
+    pack regardless of the real season count, and title-matches correctly
+    once the ambiguous year is no longer the first thing it can parse as
+    numbering. Only touches the display title Sonarr/Radarr parse - the
+    magnet/hash driving the actual download is untouched.
+    """
+    if row.get("type") != "series" or not raw_title:
+        return raw_title
+    pd = row.get("parsed_data") or {}
+    if isinstance(pd, str):
+        try:
+            pd = _json.loads(pd)
+        except Exception:
+            pd = {}
+    if not pd.get("complete") or pd.get("seasons"):
+        return raw_title
+    if not _FULL_SERIES_MARK_RE.search(raw_title):
+        return raw_title
+    if _HAS_SEASON_TOKEN_RE.search(raw_title):
+        return raw_title
+    m = _YEAR_TOKEN_RE.search(raw_title)
+    if m:
+        idx = m.end()
+        return raw_title[:idx] + ".S01-S99" + raw_title[idx:]
+    parsed_title = pd.get("parsed_title") or ""
+    if parsed_title and raw_title.lower().startswith(parsed_title.lower()):
+        idx = len(parsed_title)
+        return raw_title[:idx] + ".S01-S99" + raw_title[idx:]
+    return raw_title
+
+
 def _item_xml(row) -> str:
     magnet = _magnet(row)
     if not magnet:
@@ -753,7 +810,7 @@ def _item_xml(row) -> str:
     size = int(row["size"] or 0)
     seeders = int(row["seeders"] or 0)
     cat = _category(row["type"])
-    title = html.escape(row["raw_title"] or ih)
+    title = html.escape(_rewrite_title_for_full_series(row["raw_title"] or ih, row))
     pub = formatdate(float(row["created_at"] or time.time()), usegmt=True)
     indexer = html.escape(row.get("indexer") or "reborn")
     m_attr = html.escape(magnet, quote=True)
@@ -844,6 +901,7 @@ async def list_help(request: Request):
         },
         "query_params": {
             "days": "release added in the last N days (0 = all-time)",
+            "hours": "release added in the last N hours (fractional days allowed); takes priority over days if both are given",
             "min_seeders": "keep a title only if one of its releases has >= this many seeders",
             "languages": "comma list of stream-fusion tags (fr,multi,vostfr,en,…); empty = any",
             "resolutions": "comma list e.g. 2160p,1080p; empty = any",
