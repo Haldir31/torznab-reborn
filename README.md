@@ -76,6 +76,18 @@ docker compose up -d --build
 
 The API listens on `:9118`.
 
+## Prebuilt image
+
+A multi-arch (`linux/amd64`, `linux/arm64`) image is built and published to
+GHCR on every push to `main` and on `v*` tags:
+
+```bash
+docker pull ghcr.io/<owner>/torznab-reborn:latest
+```
+
+In `docker-compose.yml`, replace `build: .` with
+`image: ghcr.io/<owner>/torznab-reborn:latest` to use it.
+
 ## Registering in Prowlarr
 
 - Indexer type: **Generic Torznab**
